@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #=================================================================
-#  VPS 全能检测脚本  vpscheck  v3.1.0
+#  VPS 全能检测脚本  vpscheck  v3.2.0
 #
 #  作者:   静水流深
 #  网站:   中国站长
@@ -25,8 +25,15 @@
 #  支持地区: 新加坡/香港/台湾/北美/日本/澳洲/欧洲
 #=================================================================
 
-VER='3.1.0'
+VER='3.2.0'
 SCRIPT_NAME="VPS 全能检测"
+
+# Bash 版本检测（declare -A 关联数组需要 Bash 4.0+）
+if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
+    echo "错误：此脚本需要 Bash 4.0 或更高版本（当前: ${BASH_VERSION}）"
+    echo "CentOS 6 用户请先升级 Bash：yum install -y bash"
+    exit 1
+fi
 HISTORY_FILE="/tmp/.mediacheck_history"
 REPORT_FILE=""
 
@@ -185,6 +192,15 @@ detect_ip_type() {
     ipapi_res=$(curl $CURL_OPTS -s \
         "http://ip-api.com/json/${LOCAL_IP}?fields=status,proxy,hosting,mobile,isp,org,as" \
         -H "User-Agent: ${UA_BROWSER}" 2>/dev/null)
+
+    # 处理 ip-api.com 限速（免费版 45次/分钟）
+    if echo "$ipapi_res" | grep -qi '"message"\s*:\s*"you have exceeded'; then
+        echo -e " ${YELLOW}ip-api.com 触发限速，等待 10 秒后重试...${PLAIN}"
+        sleep 10
+        ipapi_res=$(curl $CURL_OPTS -s \
+            "http://ip-api.com/json/${LOCAL_IP}?fields=status,proxy,hosting,mobile,isp,org,as" \
+            -H "User-Agent: ${UA_BROWSER}" 2>/dev/null)
+    fi
 
     local is_proxy
     is_proxy=$(echo "$ipapi_res" | grep -oP '"proxy"\s*:\s*\K(true|false)')
@@ -772,23 +788,24 @@ check_bbc_iplayer() {
 }
 
 check_bahamut() {
+    local bahamut_ck="/tmp/bahamut_ck_$$.txt"
     local device_res
     device_res=$(curl $CURL_OPTS $PROXY_OPTS $USE_INTERFACE \
         "https://ani.gamer.com.tw/ajax/getdeviceid.php" \
-        -c /tmp/bahamut_ck.txt -H "User-Agent: ${UA_BROWSER}" 2>/dev/null)
+        -c "$bahamut_ck" -H "User-Agent: ${UA_BROWSER}" 2>/dev/null)
     if [[ -z "$device_res" ]]; then
-        rm -f /tmp/bahamut_ck.txt; print_result "Bahamut Anime (動畫瘋)" "err" "网络连接失败"; return
+        rm -f "$bahamut_ck"; print_result "Bahamut Anime (動畫瘋)" "err" "网络连接失败"; return
     fi
     local deviceid
     deviceid=$(echo "$device_res" | grep -oP '"deviceid"\s*:\s*"\K[^"]+')
     if [[ -z "$deviceid" ]]; then
-        rm -f /tmp/bahamut_ck.txt; print_result "Bahamut Anime (動畫瘋)" "err" "获取设备ID失败"; return
+        rm -f "$bahamut_ck"; print_result "Bahamut Anime (動畫瘋)" "err" "获取设备ID失败"; return
     fi
     local token_res
     token_res=$(curl $CURL_OPTS $PROXY_OPTS $USE_INTERFACE \
         "https://ani.gamer.com.tw/ajax/token.php?adID=89422&sn=37783&device=${deviceid}" \
-        -b /tmp/bahamut_ck.txt -H "User-Agent: ${UA_BROWSER}" 2>/dev/null)
-    rm -f /tmp/bahamut_ck.txt
+        -b "$bahamut_ck" -H "User-Agent: ${UA_BROWSER}" 2>/dev/null)
+    rm -f "$bahamut_ck"
     if echo "$token_res" | grep -qi '"animeSn"'; then
         print_result "Bahamut Anime (動畫瘋)" "ok" "解锁 (台灣)"
     elif echo "$token_res" | grep -qi 'out of service area\|overseas\|非台灣'; then
@@ -1122,6 +1139,59 @@ check_sora() {
     fi
 }
 
+check_deepseek() {
+    local res
+    res=$(curl $CURL_OPTS $PROXY_OPTS $USE_INTERFACE \
+        -o /dev/null -w "%{http_code}:%{url_effective}" \
+        "https://chat.deepseek.com/" -H "User-Agent: ${UA_BROWSER}" 2>/dev/null)
+    local http_code="${res%%:*}"
+    local final_url="${res#*:}"
+    [[ -z "$http_code" || "$http_code" == "000" ]] && { print_result "DeepSeek" "err" "网络连接失败"; return; }
+    if echo "$final_url" | grep -qi 'blocked\|geo\|unavailable' || [[ "$http_code" == "403" ]]; then
+        print_result "DeepSeek" "no" "地区不支持"
+    elif [[ "$http_code" == "200" || "$http_code" == "301" || "$http_code" == "302" ]]; then
+        # 进一步验证 API 可达性
+        local api_code
+        api_code=$(curl $CURL_OPTS $PROXY_OPTS $USE_INTERFACE \
+            -o /dev/null -w "%{http_code}" \
+            "https://api.deepseek.com/v1/models" \
+            -H "User-Agent: ${UA_BROWSER}" 2>/dev/null)
+        if [[ "$api_code" == "401" || "$api_code" == "200" ]]; then
+            print_result "DeepSeek" "ok" "可访问 (API 需认证)"
+        else
+            print_result "DeepSeek" "ok" "主页可访问"
+        fi
+    else
+        print_result "DeepSeek" "err" "检测失败 (HTTP ${http_code})"
+    fi
+}
+
+check_kimi() {
+    local res
+    res=$(curl $CURL_OPTS $PROXY_OPTS $USE_INTERFACE \
+        -o /dev/null -w "%{http_code}:%{url_effective}" \
+        "https://kimi.moonshot.cn/" -H "User-Agent: ${UA_BROWSER}" 2>/dev/null)
+    local http_code="${res%%:*}"
+    local final_url="${res#*:}"
+    [[ -z "$http_code" || "$http_code" == "000" ]] && { print_result "Kimi (月之暗面)" "err" "网络连接失败"; return; }
+    if echo "$final_url" | grep -qi 'blocked\|geo\|unavailable' || [[ "$http_code" == "403" ]]; then
+        print_result "Kimi (月之暗面)" "no" "地区不支持"
+    elif [[ "$http_code" == "200" || "$http_code" == "301" || "$http_code" == "302" ]]; then
+        local api_code
+        api_code=$(curl $CURL_OPTS $PROXY_OPTS $USE_INTERFACE \
+            -o /dev/null -w "%{http_code}" \
+            "https://api.moonshot.cn/v1/models" \
+            -H "User-Agent: ${UA_BROWSER}" 2>/dev/null)
+        if [[ "$api_code" == "401" || "$api_code" == "200" ]]; then
+            print_result "Kimi (月之暗面)" "ok" "可访问 (API 需认证)"
+        else
+            print_result "Kimi (月之暗面)" "ok" "主页可访问"
+        fi
+    else
+        print_result "Kimi (月之暗面)" "err" "检测失败 (HTTP ${http_code})"
+    fi
+}
+
 # ─────────────────────────────────────────────
 #  分组运行
 # ─────────────────────────────────────────────
@@ -1166,6 +1236,8 @@ run_ai_services() {
     check_character_ai
     check_poe
     check_sora
+    check_deepseek
+    check_kimi
 }
 
 run_sports_uk() {
@@ -1355,10 +1427,11 @@ install_speedtest() {
     local tgz_name="ookla-speedtest-1.2.0-linux-${arch}.tgz"
     local download_url="https://install.speedtest.net/app/cli/${tgz_name}"
 
-    # 备用镜像
+    # 备用镜像（优先国内可用地址）
     local mirrors=(
         "https://install.speedtest.net/app/cli/${tgz_name}"
-        "https://github.com/nicholasgkong/nicholasgkong.github.io/releases/download/speedtest/ookla-speedtest-1.2.0-linux-${arch}.tgz"
+        "https://dl.lamp.sh/speedtest/${tgz_name}"
+        "https://gh.api.99988866.xyz/https://github.com/nicholasgkong/nicholasgkong.github.io/releases/download/speedtest/ookla-speedtest-1.2.0-linux-${arch}.tgz"
     )
 
     local downloaded=0
@@ -2099,7 +2172,7 @@ show_header() {
     clear
     echo ""
     echo -e "${BLUE}${BOLD}╔══════════════════════════════════════════════════════════════╗${PLAIN}"
-    echo -e "${BLUE}${BOLD}║              VPS 全能检测脚本  vpscheck  v3.1.0             ║${PLAIN}"
+    echo -e "${BLUE}${BOLD}║              VPS 全能检测脚本  vpscheck  v3.2.0             ║${PLAIN}"
     echo -e "${BLUE}${BOLD}║  流媒体解锁 / AI服务 / IP分析 / 三网测速 / 回程路由        ║${PLAIN}"
     echo -e "${BLUE}${BOLD}║  系统信息 / 磁盘IO / UnixBench / IPv6 / 延迟测试           ║${PLAIN}"
     echo -e "${BLUE}${BOLD}╠══════════════════════════════════════════════════════════════╣${PLAIN}"
@@ -2166,7 +2239,7 @@ show_menu() {
     echo -e "  ${GREEN}2.${PLAIN} 全球流媒体  ${DIM}Netflix / Disney+ / HBO / Hulu / Prime ...${PLAIN}"
     echo -e "  ${GREEN}3.${PLAIN} 亚太流媒体  ${DIM}HotStar / 動畫瘋 / AbemaTV / NicoNico ...${PLAIN}"
     echo -e "  ${GREEN}4.${PLAIN} 音乐 & 短视频  ${DIM}Spotify / YouTube / TikTok${PLAIN}"
-    echo -e "  ${GREEN}5.${PLAIN} AI 服务  ${DIM}ChatGPT / Gemini / Claude / Copilot / Grok / Mistral ...${PLAIN}"
+    echo -e "  ${GREEN}5.${PLAIN} AI 服务  ${DIM}ChatGPT / Gemini / Claude / Copilot / Grok / DeepSeek / Kimi ...${PLAIN}"
     echo -e "  ${GREEN}6.${PLAIN} 体育 & 英国  ${DIM}DAZN / F1 TV / BBC iPlayer${PLAIN}"
     echo -e "  ${GREEN}7.${PLAIN} 工具类  ${DIM}Steam 货币区${PLAIN}"
     echo -e "  ${GREEN}8.${PLAIN} 延迟测试  ${DIM}各大 CDN 节点延迟${PLAIN}"
@@ -2269,6 +2342,11 @@ check_deps() {
     # ── bc（延迟计算，部分系统没有）──
     if ! command_exists bc && ! command_exists awk; then
         missing+=("bc")
+    fi
+
+    # ── gawk（确保使用 GNU awk，mawk 不完全兼容）──
+    if command_exists awk && ! (awk --version 2>&1 | grep -qi 'GNU') && ! command_exists gawk; then
+        missing+=("gawk")
     fi
 
     # 若有缺失，先更新索引再批量安装
